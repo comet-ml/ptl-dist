@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.transforms as T
 from pytorch_lightning import Trainer
-from pytorch_lightning.loggers import CometLogger
+from pytorch_lightning.loggers import CometLogger, TensorBoardLogger
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader, random_split
 from torchmetrics import Accuracy
@@ -30,19 +30,6 @@ def get_args():
     parser.add_argument("--experiment_id")
     return parser.parse_args()
 
-def get_experiment(experiment_id=None):
-    if experiment_id is None:
-        return comet_ml.Experiment(
-            project_name=PROJECT_NAME, log_env_cpu=True, log_env_gpu=True
-        )
-
-    else:
-        os.environ["COMET_EXPERIMENT_KEY"] = experiment_id
-        return comet_ml.ExistingExperiment(
-            project_name=PROJECT_NAME, log_env_cpu=True, log_env_gpu=True
-        )
-
-
 
 class Model(pl.LightningModule):
     def __init__(self):
@@ -55,53 +42,60 @@ class Model(pl.LightningModule):
     def training_step(self, batch, batch_nb):
         x, y = batch
         loss = F.cross_entropy(self(x), y)
-        self.logger.log_metrics({"train_loss": loss}, step=batch_nb)
+        self.logger.log_metrics({"train_loss": loss})
         return loss
 
     def validation_step(self, batch, batch_nb):
         x, y = batch
         y_hat = self.forward(x)
         loss = F.cross_entropy(y_hat, y)
-        self.logger.log_metrics({"val_loss": loss}, step=batch_nb)
+        self.logger.log_metrics({"val_loss": loss})
         return loss
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=0.02)
 
-try:
-    args = get_args()
-    # Init our model
-    model = Model()
 
-    node_rank = os.getenv("NODE_RANK")
-    os.environ["COMET_DISTRIBUTED_NODE_IDENTIFIER"] = f"node-{node_rank}"
-    print("Comet Node Identifier: ", f"node-{node_rank}")
+args = get_args()
+# Init our model
+model = Model()
 
-    experiment = get_experiment(args.experiment_id)
-    comet_logger = CometLogger(
-        experiment_key=experiment.id, log_env_cpu=True, log_env_gpu=True
-    )
-    comet_logger.log_hyperparams({"batch_size": BATCH_SIZE})
-    # Init DataLoader from MNIST Dataset
-    train_ds = MNIST(
-        PATH_DATASETS, train=True, download=True, transform=transforms.ToTensor()
-    )
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE)
-    eval_ds = MNIST(
-        PATH_DATASETS, train=False, download=True, transform=transforms.ToTensor()
-    )
-    eval_loader = DataLoader(train_ds, batch_size=BATCH_SIZE)
-    # Initialize a trainer
-    trainer = Trainer(
-        accelerator="gpu",
-        max_epochs=MAX_EPOCHS,
-        logger=comet_logger,
-        strategy="ddp",
-        num_nodes=2,
-        devices=1,
-    )
-    # Train the model ⚡
-    trainer.fit(model, train_loader, eval_loader)
+node_rank = os.getenv("NODE_RANK")
+os.environ["COMET_DISTRIBUTED_NODE_IDENTIFIER"] = f"node-{node_rank}"
+print("Comet Node Identifier: ", f"node-{node_rank}")
 
-except KeyboardInterrupt:
-    experiment.end()
+if args.experiment_id:
+    experiment = comet_ml.ExistingExperiment(
+        previous_experiment=args.experiment_id,
+        log_env_details=True,
+        log_env_cpu=True,
+        log_env_gpu=True,
+    )
+    # Use the default lightning logger on the worker nodes
+    logger = TensorBoardLogger(save_dir=os.getcwd(), version=1, name="lightning_logs")
+else:
+    logger = CometLogger(log_env_cpu=True, log_env_gpu=True, project_name=PROJECT_NAME)
+
+logger.log_hyperparams({"batch_size": BATCH_SIZE})
+
+# Init DataLoader from MNIST Dataset
+train_ds = MNIST(
+    PATH_DATASETS, train=True, download=True, transform=transforms.ToTensor()
+)
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE)
+eval_ds = MNIST(
+    PATH_DATASETS, train=False, download=True, transform=transforms.ToTensor()
+)
+eval_loader = DataLoader(train_ds, batch_size=BATCH_SIZE)
+
+# Initialize a trainer
+trainer = Trainer(
+    accelerator="gpu",
+    max_epochs=MAX_EPOCHS,
+    logger=logger,
+    strategy="ddp",
+    num_nodes=2,
+    devices=1,
+)
+# Train the model ⚡
+trainer.fit(model, train_loader, eval_loader)
